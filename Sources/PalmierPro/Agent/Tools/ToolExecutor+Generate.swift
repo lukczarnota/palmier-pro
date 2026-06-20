@@ -3,12 +3,6 @@ import Foundation
 extension ToolExecutor {
     func generate(_ editor: EditorViewModel, _ args: [String: Any], type: ClipType) throws -> ToolResult {
         let prompt = try args.requireString("prompt")
-        guard AccountService.shared.isSignedIn else {
-            throw ToolError("Generation requires signing in to Palmier. Tell the user to sign in.")
-        }
-        guard AccountService.shared.hasCredits else {
-            throw ToolError("Out of credits. Tell the user to add credits or subscribe to keep generating.")
-        }
         switch type {
         case .video:
             guard let modelId = args.string("model") ?? VideoModelConfig.allModels.first?.id else {
@@ -17,6 +11,7 @@ extension ToolExecutor {
             guard let model = VideoModelConfig.allModels.first(where: { $0.id == modelId }) else {
                 throw ToolError("Unknown model '\(modelId)'. Available: \(VideoModelConfig.allModels.map(\.id).joined(separator: ", "))")
             }
+            try requireGenerationAllowed(modelId: model.id)
             return model.requiresSourceVideo
                 ? try generateVideoEdit(editor, args, prompt: prompt, model: model)
                 : try generateVideoText(editor, args, prompt: prompt, model: model)
@@ -28,6 +23,31 @@ extension ToolExecutor {
             throw ToolError("Text generation is not wired through the generate tool.")
         case .lottie:
             throw ToolError("Lottie animations aren't generated through this tool.")
+        }
+    }
+
+    /// Per-model gate: Palmier models need sign-in + credits; BYOK models need their key.
+    func requireGenerationAllowed(modelId: String) throws {
+        switch GenerationProviders.kind(forModel: modelId) {
+        case .palmier:
+            guard AccountService.shared.isSignedIn else {
+                throw ToolError("Generation requires signing in to Palmier. Tell the user to sign in.")
+            }
+            guard AccountService.shared.hasCredits else {
+                throw ToolError("Out of credits. Tell the user to add credits or subscribe to keep generating.")
+            }
+        case .openrouter:
+            guard OpenRouterKeychain.load() != nil else {
+                throw ToolError("Model '\(modelId)' needs an OpenRouter API key. Add it in Settings > Agent.")
+            }
+        case .fal:
+            guard FalKeychain.load() != nil else {
+                throw ToolError("Model '\(modelId)' needs a fal.ai API key. Add it in Settings > Agent.")
+            }
+        case .replicate:
+            guard ReplicateKeychain.load() != nil else {
+                throw ToolError("Model '\(modelId)' needs a Replicate API key. Add it in Settings > Agent.")
+            }
         }
     }
 
@@ -157,6 +177,7 @@ extension ToolExecutor {
         guard let model = ImageModelConfig.allModels.first(where: { $0.id == modelId }) else {
             throw ToolError("Unknown model '\(modelId)'. Available: \(ImageModelConfig.allModels.map(\.id).joined(separator: ", "))")
         }
+        try requireGenerationAllowed(modelId: model.id)
         let aspectRatio = args.string("aspectRatio") ?? model.aspectRatios.first ?? ""
         let resolution = args.string("resolution") ?? model.resolutions?.first
         let quality = args.string("quality") ?? model.qualities?.last
@@ -195,18 +216,13 @@ extension ToolExecutor {
     }
 
     func generateAudio(_ editor: EditorViewModel, _ args: [String: Any]) async throws -> ToolResult {
-        guard AccountService.shared.isSignedIn else {
-            throw ToolError("Generation requires signing in to Palmier. Tell the user to sign in.")
-        }
-        guard AccountService.shared.hasCredits else {
-            throw ToolError("Out of credits. Tell the user to add credits or subscribe to keep generating.")
-        }
         guard let modelId = args.string("model") ?? AudioModelConfig.allModels.first?.id else {
             throw ToolError("Model catalog not loaded yet. Try again in a moment.")
         }
         guard let model = AudioModelConfig.allModels.first(where: { $0.id == modelId }) else {
             throw ToolError("Unknown model '\(modelId)'. Available: \(AudioModelConfig.allModels.map(\.id).joined(separator: ", "))")
         }
+        try requireGenerationAllowed(modelId: model.id)
 
         let prompt = (args.string("prompt") ?? "").trimmingCharacters(in: .whitespaces)
         let acceptsVideo = model.inputs.contains(.video)
@@ -316,12 +332,6 @@ extension ToolExecutor {
         guard asset.type == .video || asset.type == .image else {
             throw ToolError("Upscale supports video and image assets only (got \(asset.type.rawValue))")
         }
-        guard AccountService.shared.isSignedIn else {
-            throw ToolError("Upscale requires signing in to Palmier. Tell the user to sign in.")
-        }
-        guard AccountService.shared.hasCredits else {
-            throw ToolError("Out of credits. Tell the user to add credits or subscribe to keep generating.")
-        }
 
         let available = UpscaleModelConfig.models(for: asset.type)
         let model: UpscaleModelConfig
@@ -337,6 +347,8 @@ extension ToolExecutor {
             }
             model = first
         }
+
+        try requireGenerationAllowed(modelId: model.id)
 
         let trimmed = try trimmedSource(args, editor: editor, source: asset)
         guard let placeholderId = EditSubmitter.submitUpscale(
