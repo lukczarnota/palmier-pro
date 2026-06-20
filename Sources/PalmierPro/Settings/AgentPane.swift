@@ -14,6 +14,12 @@ struct AgentPane: View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.lg) {
             apiKeySection
             Divider().overlay(AppTheme.Border.subtleColor)
+            openRouterSection
+            Divider().overlay(AppTheme.Border.subtleColor)
+            falSection
+            Divider().overlay(AppTheme.Border.subtleColor)
+            replicateSection
+            Divider().overlay(AppTheme.Border.subtleColor)
             mcpSection
         }
         .onAppear(perform: refresh)
@@ -24,6 +30,45 @@ struct AgentPane: View {
             header
             keyField
         }
+    }
+
+    private var openRouterSection: some View {
+        ProviderKeyField(
+            title: "OpenRouter API Key",
+            subtitle: "Generate video with your own OpenRouter key (Veo, Wan, Seedance). Stored in your macOS Keychain.",
+            placeholder: "sk-or-...",
+            consoleURL: URL(string: "https://openrouter.ai/keys")!,
+            consoleLabel: "Get OpenRouter key",
+            load: { OpenRouterKeychain.load() },
+            save: { OpenRouterKeychain.save($0) },
+            delete: { OpenRouterKeychain.delete() }
+        )
+    }
+
+    private var falSection: some View {
+        ProviderKeyField(
+            title: "fal.ai API Key",
+            subtitle: "Optional. Adds fal.ai models (Kling, audio, upscale). Stored in your macOS Keychain.",
+            placeholder: "fal-...",
+            consoleURL: URL(string: "https://fal.ai/dashboard/keys")!,
+            consoleLabel: "Get fal.ai key",
+            load: { FalKeychain.load() },
+            save: { FalKeychain.save($0) },
+            delete: { FalKeychain.delete() }
+        )
+    }
+
+    private var replicateSection: some View {
+        ProviderKeyField(
+            title: "Replicate API Key",
+            subtitle: "Optional. Broadest catalog — Kling, Veo, Seedance, Wan, Flux, Nano Banana, GPT-image. Stored in your macOS Keychain.",
+            placeholder: "r8_...",
+            consoleURL: URL(string: "https://replicate.com/account/api-tokens")!,
+            consoleLabel: "Get Replicate key",
+            load: { ReplicateKeychain.load() },
+            save: { ReplicateKeychain.save($0) },
+            delete: { ReplicateKeychain.delete() }
+        )
     }
 
     private var header: some View {
