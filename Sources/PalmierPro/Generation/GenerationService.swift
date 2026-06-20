@@ -62,6 +62,7 @@ final class GenerationService {
         }
         let primaryId = placeholders[0].id
         let refURLs = references.map(\.url)
+        let provider = GenerationProviders.provider(forModel: genInput.model)
 
         Task { @MainActor in
             var tempToCleanup: [URL] = []
@@ -107,6 +108,7 @@ final class GenerationService {
                         at: urlsToUpload,
                         types: refTypes,
                         cacheKeys: cacheKeys,
+                        provider: provider,
                     )
                 }
 
@@ -129,6 +131,7 @@ final class GenerationService {
                     placeholders: placeholders,
                     params: params,
                     genInput: finalGenInput,
+                    provider: provider,
                     editor: editor,
                     onComplete: onComplete,
                     onFailure: onFailure
@@ -229,6 +232,7 @@ final class GenerationService {
         at urls: [URL],
         types: [ClipType],
         cacheKeys: [MediaAsset?],
+        provider: any GenerationProvider,
     ) async throws -> [String] {
         guard !urls.isEmpty else { return [] }
         return try await withThrowingTaskGroup(of: (Int, String).self) { group in
@@ -241,7 +245,7 @@ final class GenerationService {
                 }
                 let contentType = Self.contentType(for: url, fallback: type)
                 group.addTask {
-                    let uploaded = try await GenerationBackend.uploadReference(
+                    let uploaded = try await provider.uploadReference(
                         fileURL: url,
                         contentType: contentType,
                     )
@@ -292,6 +296,7 @@ final class GenerationService {
         placeholders: [MediaAsset],
         params: BackendGenerationParams,
         genInput: GenerationInput,
+        provider: any GenerationProvider,
         editor: EditorViewModel,
         onComplete: (@MainActor (MediaAsset) -> Void)?,
         onFailure: (@MainActor () -> Void)?
@@ -302,7 +307,7 @@ final class GenerationService {
 
         let jobId: String
         do {
-            jobId = try await GenerationBackend.submit(
+            jobId = try await provider.submit(
                 model: genInput.model,
                 params: params,
                 projectId: editor.projectId,
@@ -317,7 +322,7 @@ final class GenerationService {
             return
         }
 
-        guard let publisher = GenerationBackend.subscribe(jobId: jobId) else {
+        guard let publisher = provider.subscribe(jobId: jobId) else {
             for placeholder in placeholders {
                 placeholder.generationStatus = .failed("Backend not configured")
             }
