@@ -41,6 +41,8 @@ final class ModelCatalog {
 
     @ObservationIgnored private var subscription: AnyCancellable?
     @ObservationIgnored private var didConfigure = false
+    @ObservationIgnored private var serverEntries: [CatalogEntry] = []
+    @ObservationIgnored private var keyObservers: [NSObjectProtocol] = []
 
     private init() {}
 
@@ -48,22 +50,47 @@ final class ModelCatalog {
         guard !didConfigure else { return }
         didConfigure = true
 
-        guard let client = AccountService.shared.convex else { return }
+        keyObservers = [.openRouterAPIKeyChanged, .falAPIKeyChanged, .replicateAPIKeyChanged].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.rebuild() }
+            }
+        }
 
-        subscription = client
-            .subscribe(to: "models:list", yielding: [CatalogEntry].self)
-            .receive(on: DispatchQueue.main)
-            .sink(
-                receiveCompletion: { [weak self] completion in
-                    if case .failure(let err) = completion {
-                        Log.generation.error("ModelCatalog subscription failed: \(err.localizedDescription)")
-                        self?.lastError = err.localizedDescription
+        if let client = AccountService.shared.convex {
+            subscription = client
+                .subscribe(to: "models:list", yielding: [CatalogEntry].self)
+                .receive(on: DispatchQueue.main)
+                .sink(
+                    receiveCompletion: { [weak self] completion in
+                        if case .failure(let err) = completion {
+                            Log.generation.error("ModelCatalog subscription failed: \(err.localizedDescription)")
+                            self?.lastError = err.localizedDescription
+                        }
+                    },
+                    receiveValue: { [weak self] entries in
+                        self?.serverEntries = entries
+                        self?.rebuild()
                     }
-                },
-                receiveValue: { [weak self] entries in
-                    self?.apply(entries)
-                }
-            )
+                )
+        }
+
+        // Apply BYOK-only catalog immediately so models are usable without a Convex connection.
+        rebuild()
+    }
+
+    /// Look up which provider fulfills a model id (BYOK entries carry `.openrouter`/`.fal`).
+    func providerKind(forModel id: String) -> GenerationProviderKind? {
+        switch byId[id] {
+        case .video(let m): return m.entry.provider
+        case .image(let m): return m.entry.provider
+        case .audio(let m): return m.entry.provider
+        case .upscale(let m): return m.entry.provider
+        case .none: return nil
+        }
+    }
+
+    private func rebuild() {
+        apply(serverEntries + BYOKCatalog.entries())
     }
 
     private func apply(_ entries: [CatalogEntry]) {
@@ -122,6 +149,7 @@ struct CatalogEntry: Decodable, Sendable {
     let qualities: [String]?
     let audioPricing: AudioPricing?
     let creditsPerSecondUpscale: Double?
+    let provider: GenerationProviderKind
 
     enum Kind: String, Decodable, Sendable { case video, image, audio, upscale }
     enum ResponseShape: String, Decodable, Sendable {
@@ -163,7 +191,7 @@ struct CatalogEntry: Decodable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, kind, displayName, allowedEndpoints, responseShape, uiCapabilities
         case creditsPerSecond, audioDiscountRate, creditsPerImage, qualities
-        case audioPricing, creditsPerSecondUpscale
+        case audioPricing, creditsPerSecondUpscale, provider
     }
 
     init(from decoder: Decoder) throws {
@@ -179,6 +207,7 @@ struct CatalogEntry: Decodable, Sendable {
         self.qualities = try c.decodeIfPresent([String].self, forKey: .qualities)
         self.audioPricing = try c.decodeIfPresent(AudioPricing.self, forKey: .audioPricing)
         self.creditsPerSecondUpscale = try c.decodeIfPresent(Double.self, forKey: .creditsPerSecondUpscale)
+        self.provider = try c.decodeIfPresent(GenerationProviderKind.self, forKey: .provider) ?? .palmier
         switch self.kind {
         case .video:
             self.uiCapabilities = .video(try c.decode(VideoCaps.self, forKey: .uiCapabilities))
@@ -189,6 +218,38 @@ struct CatalogEntry: Decodable, Sendable {
         case .upscale:
             self.uiCapabilities = .upscale(try c.decode(UpscaleCaps.self, forKey: .uiCapabilities))
         }
+    }
+
+    /// Memberwise init for synthesizing BYOK entries in code (the server JSON path uses
+    /// `init(from:)`).
+    init(
+        id: String,
+        kind: Kind,
+        displayName: String,
+        allowedEndpoints: [String],
+        responseShape: ResponseShape,
+        uiCapabilities: UICapabilities,
+        creditsPerSecond: [String: Double]? = nil,
+        audioDiscountRate: [String: Double]? = nil,
+        creditsPerImage: [String: Double]? = nil,
+        qualities: [String]? = nil,
+        audioPricing: AudioPricing? = nil,
+        creditsPerSecondUpscale: Double? = nil,
+        provider: GenerationProviderKind
+    ) {
+        self.id = id
+        self.kind = kind
+        self.displayName = displayName
+        self.allowedEndpoints = allowedEndpoints
+        self.responseShape = responseShape
+        self.uiCapabilities = uiCapabilities
+        self.creditsPerSecond = creditsPerSecond
+        self.audioDiscountRate = audioDiscountRate
+        self.creditsPerImage = creditsPerImage
+        self.qualities = qualities
+        self.audioPricing = audioPricing
+        self.creditsPerSecondUpscale = creditsPerSecondUpscale
+        self.provider = provider
     }
 }
 
