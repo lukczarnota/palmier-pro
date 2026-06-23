@@ -46,8 +46,8 @@ struct OpenRouterGenerationProvider: GenerationProvider {
         if let r = v.resolution, !r.isEmpty { body["resolution"] = r }
 
         var frames: [[String: Any]] = []
-        if let s = v.startFrameURL { frames.append(["image_url": s, "frame_type": "first_frame"]) }
-        if let e = v.endFrameURL { frames.append(["image_url": e, "frame_type": "last_frame"]) }
+        if let s = v.startFrameURL { frames.append(["type": "image_url", "image_url": ["url": s], "frame_type": "first_frame"]) }
+        if let e = v.endFrameURL { frames.append(["type": "image_url", "image_url": ["url": e], "frame_type": "last_frame"]) }
         if !frames.isEmpty { body["frame_images"] = frames }
 
         let data = try await send(path: "videos", method: "POST", key: key, jsonBody: body)

@@ -26,10 +26,13 @@ enum FalError: LocalizedError {
 @MainActor
 struct FalGenerationProvider: GenerationProvider {
     private static let base = URL(string: "https://queue.fal.run/")!
+    /// Synchronous endpoint for "inference"-kind models (e.g. ElevenLabs) that reject queue.fal.run with 405.
+    private static let syncBase = URL(string: "https://fal.run/")!
     private static let pollInterval: UInt64 = 5_000_000_000
     /// `subscribe` only receives the job id, but fal polling needs the model path too,
     /// so submit packs both into an opaque token GenerationService passes straight back.
     private static let tokenSeparator = "~|~"
+    private static let syncPrefix = "sync~|~"
 
     func uploadReference(fileURL: URL, contentType: String) async throws -> String {
         // fal `image_url` fields accept inline data URIs, so no storage round-trip is needed.
@@ -39,13 +42,45 @@ struct FalGenerationProvider: GenerationProvider {
 
     func submit(model: String, params: BackendGenerationParams, projectId: String?) async throws -> String {
         guard let key = FalKeychain.load() else { throw FalError.missingKey }
-        let body = try Self.requestBody(for: params)
+        let body = try Self.requestBody(for: params, model: model)
+
+        // Audio and image models on fal are "inference" kind — they use fal.run (sync), because
+        // queue.fal.run returns 405 for them. Video/upscale stay on the async queue.
+        let usesSyncEndpoint: Bool
+        switch params {
+        case .audio, .image: usesSyncEndpoint = true
+        case .video, .upscale: usesSyncEndpoint = false
+        }
+        if usesSyncEndpoint {
+            let url = Self.syncBase.appendingPathComponent(model)
+            let data = try await send(url: url, method: "POST", key: key, jsonBody: body, timeout: 300)
+            let result = try decode(FalResult.self, from: data)
+            var urls: [String] = []
+            if let u = result.audio?.url { urls.append(u) }
+            if let u = result.video?.url { urls.append(u) }
+            if let u = result.image?.url { urls.append(u) }
+            if let imgs = result.images { urls += imgs.compactMap(\.url) }
+            guard !urls.isEmpty else { throw FalError.noResult }
+            return "\(Self.syncPrefix)\(urls.joined(separator: ","))"
+        }
+
         let data = try await send(url: Self.base.appendingPathComponent(model), method: "POST", key: key, jsonBody: body)
         let decoded = try decode(FalSubmitResponse.self, from: data)
         return "\(model)\(Self.tokenSeparator)\(decoded.request_id)"
     }
 
     func subscribe(jobId token: String) -> AnyPublisher<BackendGenerationJob?, Never>? {
+        // Sync-path audio: result already in the token, no polling needed.
+        if token.hasPrefix(Self.syncPrefix) {
+            let urlList = String(token.dropFirst(Self.syncPrefix.count))
+            let urls = urlList.components(separatedBy: ",").filter { !$0.isEmpty }
+            let job = BackendGenerationJob(
+                _id: "sync", status: .succeeded, resultUrls: urls,
+                errorMessage: nil, costCredits: nil, completedAt: nil
+            )
+            return Just(job).eraseToAnyPublisher()
+        }
+
         guard let key = FalKeychain.load() else { return nil }
         let parts = token.components(separatedBy: Self.tokenSeparator)
         guard parts.count == 2 else { return nil }
@@ -123,7 +158,7 @@ struct FalGenerationProvider: GenerationProvider {
 
     // MARK: - Request body
 
-    private static func requestBody(for params: BackendGenerationParams) throws -> [String: Any] {
+    private static func requestBody(for params: BackendGenerationParams, model: String) throws -> [String: Any] {
         switch params {
         case .video(let v):
             var body: [String: Any] = ["prompt": v.prompt]
@@ -133,25 +168,78 @@ struct FalGenerationProvider: GenerationProvider {
             if let tail = v.endFrameURL { body["tail_image_url"] = tail }
             return body
         case .image(let i):
-            var body: [String: Any] = ["prompt": i.prompt]
-            if !i.aspectRatio.isEmpty { body["aspect_ratio"] = i.aspectRatio }
-            if i.numImages > 0 { body["num_images"] = i.numImages }
-            if let first = i.imageURLs.first { body["image_url"] = first }
-            return body
+            return imageBody(i, model: model)
         case .upscale(let u):
             return ["video_url": u.sourceURL]
         case .audio(let a):
+            return audioBody(a, model: model)
+        }
+    }
+
+    /// fal audio endpoints use per-family input keys, so map our params to the model's schema.
+    private static func audioBody(_ a: AudioGenerationParams, model: String) -> [String: Any] {
+        if model.contains("elevenlabs/music") {
             var body: [String: Any] = ["prompt": a.prompt]
-            if let d = a.durationSeconds, d > 0 { body["duration"] = d }
-            if let lyrics = a.lyrics { body["lyrics"] = lyrics }
+            if let d = a.durationSeconds, d > 0 { body["music_length_ms"] = Int(d * 1000) }
+            if a.instrumental { body["force_instrumental"] = true }
             return body
+        }
+        if model.contains("elevenlabs/tts") {
+            var body: [String: Any] = ["text": a.prompt]
+            if let v = a.voice, !v.isEmpty { body["voice"] = v }
+            return body
+        }
+        if model.contains("elevenlabs/sound-effects") {
+            var body: [String: Any] = ["text": a.prompt]
+            if let d = a.durationSeconds, d > 0 { body["duration_seconds"] = d }
+            return body
+        }
+        // Generic music models (e.g. Lyria, MiniMax) take prompt + duration + optional lyrics.
+        var body: [String: Any] = ["prompt": a.prompt]
+        if let d = a.durationSeconds, d > 0 { body["duration"] = d }
+        if let lyrics = a.lyrics { body["lyrics"] = lyrics }
+        return body
+    }
+
+    /// fal image endpoints diverge on input keys: nano-banana/edit takes `image_urls` (array),
+    /// flux-pro/kontext takes `image_url` (single) and both edit families size via `aspect_ratio`,
+    /// while text→image FLUX sizes via `image_size`. Wrong key is a silent 422, so branch per family.
+    private static func imageBody(_ i: ImageGenerationParams, model: String) -> [String: Any] {
+        if model.contains("nano-banana") {
+            var body: [String: Any] = ["prompt": i.prompt]
+            if !i.imageURLs.isEmpty { body["image_urls"] = i.imageURLs }
+            if !i.aspectRatio.isEmpty { body["aspect_ratio"] = i.aspectRatio }
+            if i.numImages > 0 { body["num_images"] = i.numImages }
+            return body
+        }
+        if model.contains("kontext") {
+            var body: [String: Any] = ["prompt": i.prompt]
+            if let first = i.imageURLs.first { body["image_url"] = first }
+            if !i.aspectRatio.isEmpty { body["aspect_ratio"] = i.aspectRatio }
+            if i.numImages > 0 { body["num_images"] = i.numImages }
+            return body
+        }
+        // Generic FLUX text→image: sizes via image_size enum, not aspect_ratio.
+        var body: [String: Any] = ["prompt": i.prompt]
+        if !i.aspectRatio.isEmpty { body["image_size"] = fluxImageSize(for: i.aspectRatio) }
+        if i.numImages > 0 { body["num_images"] = i.numImages }
+        return body
+    }
+
+    private static func fluxImageSize(for aspectRatio: String) -> String {
+        switch aspectRatio {
+        case "16:9": return "landscape_16_9"
+        case "9:16": return "portrait_16_9"
+        case "4:3": return "landscape_4_3"
+        case "3:4": return "portrait_4_3"
+        default: return "square_hd"
         }
     }
 
     // MARK: - HTTP
 
-    private func send(url: URL, method: String, key: String, jsonBody: [String: Any]?) async throws -> Data {
-        var req = URLRequest(url: url)
+    private func send(url: URL, method: String, key: String, jsonBody: [String: Any]?, timeout: TimeInterval = 60) async throws -> Data {
+        var req = URLRequest(url: url, timeoutInterval: timeout)
         req.httpMethod = method
         req.setValue("Key \(key)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")

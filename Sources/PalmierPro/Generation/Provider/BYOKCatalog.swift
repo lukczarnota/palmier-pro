@@ -15,6 +15,8 @@ enum BYOKCatalog {
         }
         if FalKeychain.load() != nil {
             out += falVideoModels.map { Self.videoEntry($0, provider: .fal) }
+            out += falImageModels.map { Self.imageEntry($0, provider: .fal) }
+            out += falAudioModels.map { Self.falAudioEntry($0) }
         }
         if ReplicateKeychain.load() != nil {
             out += replicateVideoModels.map { Self.videoEntry($0, provider: .replicate) }
@@ -47,6 +49,72 @@ enum BYOKCatalog {
         VideoSpec(id: "fal-ai/kling-video/v2.1/master/image-to-video", name: "Kling 2.1 Master · image→video (fal)", aspectRatios: ["16:9", "9:16", "1:1"], requiresImage: true),
     ]
 
+    private struct FalAudioSpec {
+        let id: String
+        let name: String
+        let category: String   // "music" | "tts" | "sfx"
+        var voices: [String]? = nil
+        var defaultVoice: String? = nil
+        var supportsInstrumental: Bool = false
+        var minSeconds: Int? = nil
+        var maxSeconds: Int? = nil
+        var promptLabel: String? = nil
+    }
+
+    /// ElevenLabs preset voice names accepted by the fal TTS endpoint (custom voice IDs also work,
+    /// but a fixed list lets the picker validate). Refresh from elevenlabs.io/voice-library.
+    private static let elevenLabsVoices = [
+        "Aria", "Roger", "Sarah", "Laura", "Charlie", "George", "Callum", "River",
+        "Liam", "Charlotte", "Alice", "Matilda", "Will", "Jessica", "Eric", "Chris",
+        "Brian", "Daniel", "Lily", "Bill", "Rachel",
+    ]
+
+    /// fal audio endpoints. Slug doubles as the model id; FalGenerationProvider.audioBody maps
+    /// our params to each family's input keys. Verified against fal.ai model pages as of 2026-06.
+    private static let falAudioModels: [FalAudioSpec] = [
+        FalAudioSpec(
+            id: "fal-ai/elevenlabs/music", name: "ElevenLabs Music (fal)",
+            category: "music", supportsInstrumental: true,
+            minSeconds: 3, maxSeconds: 600, promptLabel: "Describe the music"
+        ),
+        FalAudioSpec(
+            id: "fal-ai/elevenlabs/tts/multilingual-v2", name: "ElevenLabs TTS Multilingual v2 (fal)",
+            category: "tts", voices: elevenLabsVoices, defaultVoice: "Rachel",
+            promptLabel: "Text to speak"
+        ),
+    ]
+
+    private static func falAudioEntry(_ spec: FalAudioSpec) -> CatalogEntry {
+        CatalogEntry(
+            id: spec.id,
+            kind: .audio,
+            displayName: spec.name,
+            allowedEndpoints: [],
+            responseShape: .audio,
+            uiCapabilities: .audio(AudioCaps(
+                category: spec.category,
+                voices: spec.voices,
+                defaultVoice: spec.defaultVoice,
+                supportsLyrics: false,
+                supportsInstrumental: spec.supportsInstrumental,
+                supportsStyleInstructions: false,
+                durations: nil,
+                minPromptLength: 0,
+                inputs: ["text"],
+                promptLabel: spec.promptLabel,
+                minSeconds: spec.minSeconds,
+                maxSeconds: spec.maxSeconds
+            )),
+            creditsPerSecond: nil,
+            audioDiscountRate: nil,
+            creditsPerImage: nil,
+            qualities: nil,
+            audioPricing: nil,
+            creditsPerSecondUpscale: nil,
+            provider: .fal
+        )
+    }
+
     /// Replicate official-model slugs (`owner/name`, stable API, no version pinning).
     /// Curated as of 2026-06; refresh from replicate.com/collections/official when slugs rev.
     private static let replicateVideoModels: [VideoSpec] = [
@@ -61,7 +129,19 @@ enum BYOKCatalog {
         let id: String
         let name: String
         let aspectRatios: [String]
+        var supportsImageReference: Bool = false
+        var maxImages: Int = 1
     }
+
+    /// fal image endpoints. Slug doubles as the model id; FalGenerationProvider.imageBody maps
+    /// each family's input keys (kontext→image_url, nano-banana→image_urls, FLUX t2i→image_size).
+    /// Edit models take a reference image, so they restyle an existing asset (e.g. a logo) in place.
+    /// Verified against fal.ai model pages as of 2026-06.
+    private static let falImageModels: [ImageSpec] = [
+        ImageSpec(id: "fal-ai/flux-pro/v1.1", name: "FLUX 1.1 Pro · text→image (fal)", aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4"]),
+        ImageSpec(id: "fal-ai/flux-pro/kontext", name: "FLUX Kontext Pro · image edit (fal)", aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4"], supportsImageReference: true),
+        ImageSpec(id: "fal-ai/nano-banana/edit", name: "Nano Banana · image edit (fal)", aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4"], supportsImageReference: true),
+    ]
 
     private static let replicateImageModels: [ImageSpec] = [
         ImageSpec(id: "google/nano-banana-pro", name: "Nano Banana Pro (Replicate)", aspectRatios: ["1:1", "16:9", "9:16"]),
@@ -81,8 +161,8 @@ enum BYOKCatalog {
                 resolutions: nil,
                 aspectRatios: spec.aspectRatios,
                 qualities: nil,
-                supportsImageReference: false,
-                maxImages: 1
+                supportsImageReference: spec.supportsImageReference,
+                maxImages: spec.maxImages
             )),
             creditsPerSecond: nil,
             audioDiscountRate: nil,
